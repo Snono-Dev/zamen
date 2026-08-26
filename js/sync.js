@@ -19,6 +19,39 @@ const SyncEngine = (() => {
 
   const tick = () => new Promise(r => setTimeout(r, 0));
 
+  const chunkLenFor = (M, sr) =>
+    Math.max(Math.round(sr * 2.5), Math.floor(M / 16));
+
+  /* Final proof: re-locate three short probes of `needle` at their
+     PREDICTED positions inside `haystack` given a claimed placement.
+     We verify GEOMETRY (position residuals stay in the millisecond range
+     across the whole clip), which is content-independent — a wrong match
+     scatters by seconds while a true one stays tight even under drift. */
+  async function verifyPlacement(haystack, needle, startSamples, rate, srN, confMin) {
+    const N = haystack.length, M = needle.length;
+    if (M < srN * 8 || startSamples == null || !isFinite(startSamples)) return true;
+    const plen = Math.min(chunkLenFor(M, srN), Math.max(srN * 2, Math.round(M / 8)));
+    const errs = [];
+    let scored = 0;
+    for (const f of [0.06, 0.5, 0.94]) {
+      const p = Math.min(M - plen, Math.max(0, Math.round(f * (M - plen))));
+      const expected = startSamples + p * rate;
+      const slack = Math.max(srN * 2, Math.round(M * 0.02));
+      const s = Math.max(0, Math.floor(expected - slack));
+      const e = Math.min(N, Math.ceil(expected + plen + slack));
+      if (e - s < plen) continue;
+      const m = await D.findInReference(haystack.subarray(s, e), needle.subarray(p, p + plen));
+      await tick();
+      errs.push(Math.abs(s + m.index - expected));
+      if (m.score >= confMin * 0.6) scored++;
+    }
+    if (!errs.length) return true;
+    errs.sort((a, b) => a - b);
+    const medErrMs = errs[Math.floor(errs.length / 2)] / srN * 1000;
+    const tolMs = Math.max(25, (M / srN) * 1000 * 0.0012);
+    return medErrMs <= tolMs && scored >= 2;
+  }
+
   /* Locate `frag` inside `ref` using short-chunk voting + linear fit.
      Returns { startSamples, score, rate, partial } or null when nothing
      reliable is found. rate = playback speed of frag relative to ref
@@ -52,23 +85,29 @@ const SyncEngine = (() => {
       return best;
     }
 
-    if (ok.length === 1) {
-      const o = ok[0];
-      const start = o.index - o.pos;
-      let partial = null;
-      if (start < -sr || start + M > N + sr) partial = start < 0 ? "head" : "tail";
-      return finalize(start, o.score, 1, partial);
+    /* ---- robust linear fit with one round of outlier rejection ---- */
+    function fit(points) {
+      const mp = points.reduce((s, r) => s + r.pos, 0) / points.length;
+      const mi = points.reduce((s, r) => s + r.index, 0) / points.length;
+      let num = 0, den = 0;
+      for (const r of points) {
+        num += (r.pos - mp) * (r.index - mi);
+        den += (r.pos - mp) * (r.pos - mp);
+      }
+      const slope = den > 0 ? num / den : 1;
+      return { intercept: mi - slope * mp, slope };
     }
 
-    // least squares fit: index ≈ a + rate * pos
-    const mp = ok.reduce((s, r) => s + r.pos, 0) / ok.length;
-    const mi = ok.reduce((s, r) => s + r.index, 0) / ok.length;
-    let num = 0, den = 0;
-    for (const r of ok) {
-      num += (r.pos - mp) * (r.index - mi);
-      den += (r.pos - mp) * (r.pos - mp);
+    let used = ok;
+    {
+      const f1 = fit(ok);
+      const thr = Math.max(sr * 0.012, M * 0.004); // ~12 ms or 0.4% of clip
+      const kept = ok.filter(r => Math.abs(r.index - (f1.intercept + f1.slope * r.pos)) <= thr);
+      if (kept.length >= 2 && kept.length < ok.length) used = kept;
     }
-    let rate = den > 0 ? num / den : 1;
+
+    const { intercept, slope } = fit(used);
+    let rate = slope;
     if (!isFinite(rate) || Math.abs(rate - 1) > 0.05) rate = 1;
 
     // Deadband: if the measured drift would shift this clip by less than
@@ -78,12 +117,13 @@ const SyncEngine = (() => {
     let start;
     if (spanMs < 12) {
       rate = 1;
-      start = mi - mp; // plain average of per-chunk offsets
+      start = used.reduce((s, r) => s + (r.index - r.pos), 0) / used.length;
     } else {
-      start = mi - rate * mp;
+      start = intercept;
     }
 
-    const score = ok.reduce((s, r) => s + r.score, 0) / ok.length;
+    let score = used.reduce((s, r) => s + r.score, 0) / used.length;
+
     let partial = null;
     if (start < -sr || start + M * rate > N + sr) {
       partial = start < 0 ? "head" : "tail";
@@ -177,7 +217,7 @@ const SyncEngine = (() => {
     let cursor = anchor.duration;
 
     // locate one clip against every currently-placed clip.
-    // Returns best { startSec, rate, score, partial } in GLOBAL seconds.
+    // Returns best verified { startSec, rate, score, partial } in GLOBAL seconds.
     async function tryPlace(c, fracBase, fracSpan) {
       let best = null;
       const consider = cand => {
@@ -199,7 +239,9 @@ const SyncEngine = (() => {
           if (loc) {
             consider({
               startSec: gOff + loc.startSamples / c.sr,
-              rate: loc.rate, score: loc.score, partial: loc.partial
+              rate: loc.rate, score: loc.score, partial: loc.partial,
+              haystack: src.mono, needle: c.mono,
+              localStart: loc.startSamples, srN: c.sr
             });
           }
         } else {
@@ -211,12 +253,21 @@ const SyncEngine = (() => {
             consider({
               startSec: gOff - rev.startSamples / src.sr,
               rate: rev.rate, score: rev.score * 0.98,
-              // source found right at the incoming clip's head -> the
-              // incoming clip runs past the source's end
-              partial: rev.startSamples < 2 * src.sr ? "tail" : null
+              partial: rev.startSamples < 2 * src.sr ? "tail" : null,
+              haystack: c.mono, needle: src.mono,
+              localStart: rev.startSamples, srN: src.sr
             });
           }
         }
+        await tick();
+      }
+
+      /* ---- final gate: independently prove the winning placement ---- */
+      if (best) {
+        const proven = await verifyPlacement(
+          best.haystack, best.needle, best.localStart, best.rate, best.srN, opts.confMin
+        );
+        if (!proven) return null; // better no timecode than a wrong one
       }
       return best;
     }
@@ -271,7 +322,7 @@ const SyncEngine = (() => {
     return out;
   }
 
-  return { align, locate, measureDrift };
+  return { align, locate, verifyPlacement, measureDrift };
 })();
 
 if (typeof module !== "undefined" && module.exports) module.exports = SyncEngine;

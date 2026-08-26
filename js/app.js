@@ -375,7 +375,11 @@
         const loc = await SyncEngine.locate(refX, fragX, SR, opts.confMin, p =>
           setProgress(0.05 + 0.95 * ((i + p) / others.length))
         );
+        let proven = false;
         if (loc && loc.score >= opts.confMin && loc.startSamples >= -SR * 5) {
+          proven = await SyncEngine.verifyPlacement(refX, fragX, loc.startSamples, loc.rate, SR, opts.confMin);
+        }
+        if (loc && proven && loc.score >= opts.confMin && loc.startSamples >= -SR * 5) {
           const start = Math.max(0, loc.startSamples / SR);
           const rate = loc.rate;
           row = {
