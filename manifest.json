@@ -1,0 +1,16 @@
+{
+  "name": "Zamen • زامِن",
+  "short_name": "Zamen",
+  "description": "Auto-sync audio & video clips on your timeline — fully in your browser.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0d1117",
+  "theme_color": "#0d1117",
+  "lang": "ar",
+  "dir": "auto",
+  "icons": [
+    { "src": "assets/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "assets/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}

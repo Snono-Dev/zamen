@@ -29,6 +29,11 @@ main { max-width: 900px; margin: 0 auto; padding: 0 16px 40px; }
   max-width: 900px; margin: 0 auto; padding: 28px 16px 10px;
   display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
 }
+.brand { display: flex; align-items: center; gap: 14px; }
+.brand-logo {
+  width: 44px; height: 44px; border-radius: 11px;
+  box-shadow: 0 0 0 1px var(--border);
+}
 .brand h1 {
   margin: 0; font-size: 1.45rem;
   background: linear-gradient(90deg, var(--accent), var(--accent2));

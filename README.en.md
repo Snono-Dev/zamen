@@ -1,5 +1,7 @@
 # Zamen • زامِن
 
+[العربية 🇸🇦](README.md) | **English**
+
 > Every clip finds its moment
 
 ## Features

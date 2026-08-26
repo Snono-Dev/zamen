@@ -1,5 +1,7 @@
 # Zamen • زامِن
 
+**العربية** | [English 🇬🇧](README.en.md)
+
 > كل مقطع يجد لحظته — *Every clip finds its moment*
 
 ## المميزات
