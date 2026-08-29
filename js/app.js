@@ -13,9 +13,10 @@
     progressWrap: document.querySelector(".progress-wrap"),
     progressBar: $("progressBar"), statusText: $("statusText"),
     resultsPanel: $("resultsPanel"), resultsBody: document.querySelector("#resultsTable tbody"),
-    confHead: $("confHead"),
+    confHead: $("confHead"), driftHead: $("driftHead"),
     langBtn: $("langBtn"),
-    toast: $("toast")
+    toast: $("toast"),
+    waveCanvas: $("waveformCanvas")
   };
 
   const state = {
@@ -35,7 +36,6 @@
     return actx;
   }
 
-  const AUDIO_RE = /\.(mp3|wav|wave|m4a|m4b|aac|ogg|oga|opus|flac|weba)$/i;
   const VIDEO_RE = /\.(mp4|m4v|mov|webm|mkv|avi|ogv|3gp)$/i;
   const MEDIA_RE = /\.(mp3|wav|wave|m4a|m4b|aac|ogg|oga|opus|flac|weba|mp4|m4v|mov|webm|mkv|avi|ogv|3gp)$/i;
 
@@ -174,6 +174,7 @@
     if (!files.length) return;
     setBusy(true);
     showProgress(true);
+    const GAP_SEC = 3;
     try {
       for (let i = 0; i < files.length; i++) {
         const vid = isVideoFile(files[i]);
@@ -191,16 +192,35 @@
         let peak = 0;
         for (let j = 0; j < mono.length; j += 16) { const a = Math.abs(mono[j]); if (a > peak) peak = a; }
         if (vid && peak < 1e-4) toast(I18N.t("msg.noAudio", { name: files[i].name }));
-        state.clips.push({
-          id: state.nextId++,
-          name: files[i].name,
-          kind: vid ? "video" : "audio",
-          mono,
-          sr,
-          duration: mono.length / sr,
-          trimStart: 0, trimEnd: mono.length / sr,
-          trimThr: null, silent: false
-        });
+
+        const gaps = DSP.detectGaps(mono, sr, GAP_SEC);
+        const baseName = files[i].name;
+        if (gaps.length === 0) {
+          state.clips.push({
+            id: state.nextId++, name: baseName, kind: vid ? "video" : "audio",
+            mono, sr, duration: mono.length / sr,
+            trimStart: 0, trimEnd: mono.length / sr, trimThr: null, silent: false
+          });
+        } else {
+          const segs = [];
+          let prevEnd = 0;
+          for (const g of gaps) {
+            if (g.start > prevEnd) segs.push(mono.slice(prevEnd, g.start));
+            prevEnd = g.end;
+          }
+          if (prevEnd < mono.length) segs.push(mono.slice(prevEnd));
+          const total = segs.length;
+          for (let s = 0; s < segs.length; s++) {
+            const seg = segs[s];
+            const partName = baseName + " [" + (s + 1) + "/" + total + "]";
+            state.clips.push({
+              id: state.nextId++, name: partName, kind: vid ? "video" : "audio",
+              mono: seg, sr, duration: seg.length / sr,
+              trimStart: 0, trimEnd: seg.length / sr, trimThr: null, silent: false
+            });
+          }
+          toast(baseName + ": " + I18N.t("msg.split").replace("{n}", total));
+        }
       }
       setProgress(1);
       setStatus(I18N.t("status.done"));
@@ -334,7 +354,7 @@
       const ce = opts.trim ? c.trimEnd : c.duration;
       const dur = Math.max(0, ce - cs);
       const row = {
-        idx: i + 1, name: c.name,
+        idx: i + 1, name: c.name, kind: c.kind,
         start: cursor, end: cursor + dur, dur,
         conf: null,
         note: (opts.trim && c.silent) ? I18N.t("msg.silent") : null
@@ -359,7 +379,7 @@
 
     const others = state.clips.filter(c => c.id !== ref.id);
     const rows = [{
-      idx: 1, name: "\u2605 " + ref.name,
+      idx: 1, name: "\u2605 " + ref.name, kind: ref.kind,
       start: 0, end: ref.duration, dur: ref.duration,
       conf: null, driftMs: null, note: I18N.t("res.anchor")
     }];
@@ -372,18 +392,18 @@
       const fragX = await DSP.resample(c.mono, c.sr, SR);
       let row;
       if (fragX.length < refX.length && fragX.length > SR / 2) {
-        const loc = await SyncEngine.locate(refX, fragX, SR, opts.confMin, p =>
+        const loc = await SyncEngine.locate(DSP.prepareForMatch(refX, SR), DSP.prepareForMatch(fragX, SR), SR, opts.confMin, p =>
           setProgress(0.05 + 0.95 * ((i + p) / others.length))
         );
         let proven = false;
         if (loc && loc.score >= opts.confMin && loc.startSamples >= -SR * 5) {
-          proven = await SyncEngine.verifyPlacement(refX, fragX, loc.startSamples, loc.rate, SR, opts.confMin);
+          proven = await SyncEngine.verifyPlacement(DSP.prepareForMatch(refX, SR), DSP.prepareForMatch(fragX, SR), loc.startSamples, loc.rate, SR, opts.confMin);
         }
         if (loc && proven && loc.score >= opts.confMin && loc.startSamples >= -SR * 5) {
           const start = Math.max(0, loc.startSamples / SR);
           const rate = loc.rate;
           row = {
-            name: c.name, start,
+            name: c.name, kind: c.kind, start,
             end: start + c.duration * rate,
             dur: c.duration, conf: loc.score,
             driftMs: Math.abs(rate - 1) > 1e-6 ? (rate - 1) * 60000 : null,
@@ -393,7 +413,7 @@
       }
       if (!row) {
         row = {
-          name: c.name,
+          name: c.name, kind: c.kind,
           start: cursor, end: cursor + c.duration, dur: c.duration,
           conf: null, driftMs: null,
           note: c.duration >= ref.duration ? I18N.t("res.longerThanRef") : I18N.t("res.unmatched")
@@ -418,9 +438,12 @@
     const SR = 8000;
     const prepared = [];
     for (const c of state.clips) {
+      const resampled = await DSP.resample(c.mono, c.sr, SR);
+      const prepared_mono = DSP.prepareForMatch(resampled, SR);
+      console.log("[smartSync] clip:", c.name, "orig_sr=" + c.sr, "orig_len=" + c.mono.length, "resampled_len=" + resampled.length, "prepared_len=" + prepared_mono.length);
       prepared.push({
         id: c.id, name: c.name,
-        mono: await DSP.resample(c.mono, c.sr, SR),
+        mono: prepared_mono,
         sr: SR,
         duration: c.duration
       });
@@ -439,6 +462,7 @@
     const rows = placements.map(p => ({
       idx: 0,
       name: (p.note === "anchor" ? "\u2605 " : "") + p.clip.name,
+      kind: p.clip.kind,
       start: p.start,
       end: p.end,
       dur: p.clip.duration,
@@ -622,7 +646,8 @@
     document.querySelectorAll(".exports .btn").forEach(btn =>
       btn.addEventListener("click", () => {
         if (!state.results.length) return;
-        Exporters.exportAs(btn.dataset.fmt, state.results, state.lastOpts);
+        const opts = Object.assign({}, state.lastOpts);
+        Exporters.exportAs(btn.dataset.fmt, state.results, opts);
         if (btn.dataset.fmt === "copyjson") toast(I18N.t("msg.copied"));
       })
     );

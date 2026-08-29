@@ -85,6 +85,23 @@ const DSP = (() => {
 
   const tick = () => new Promise(r => setTimeout(r, 0));
 
+  /* ---------- Pre-processing for cross-device matching ---------- */
+
+  function prepareForMatch(x, sr) {
+    const out = new Float32Array(x.length);
+    const hpCoeff = Math.exp(-2 * Math.PI * 50 / sr);
+    let prev = 0;
+    for (let i = 0; i < x.length; i++) {
+      prev = prev * hpCoeff + x[i] - (i ? x[i - 1] : 0);
+      out[i] = prev;
+    }
+    let sum = 0;
+    for (let i = 0; i < out.length; i++) sum += out[i] * out[i];
+    const rms = Math.sqrt(sum / out.length) || 1;
+    for (let i = 0; i < out.length; i++) out[i] /= rms;
+    return out;
+  }
+
   /* ---------- Resampling ---------- */
 
   async function resample(x, srFrom, srTo) {
@@ -189,7 +206,40 @@ const DSP = (() => {
     return { index: bestIdx, score };
   }
 
-  return { mixToMono, detectContentBounds, resample, findInReference };
+  /* Detect internal silence gaps (> minGapSec) that are NOT at the very
+     start or end. Returns [{start, end}] in sample indices, sorted. */
+  function detectGaps(x, sr, minGapSec) {
+    const thr = Math.pow(10, -50 / 20);
+    const win = Math.max(64, Math.round(sr * 0.03));
+    const hop = Math.max(32, Math.round(win / 3));
+    const minGapSamples = Math.round(minGapSec * sr);
+    const edges = [];
+
+    let inSilence = false, silenceStart = 0;
+    const nWin = Math.max(1, Math.floor((x.length - win) / hop) + 1);
+    for (let w = 0; w < nWin; w++) {
+      const off = w * hop;
+      const end = Math.min(x.length, off + win);
+      let sum = 0;
+      for (let i = off; i < end; i++) sum += x[i] * x[i];
+      const rms = Math.sqrt(sum / Math.max(1, end - off));
+
+      if (rms <= thr) {
+        if (!inSilence) { inSilence = true; silenceStart = off; }
+      } else {
+        if (inSilence) {
+          const gapLen = off - silenceStart;
+          if (gapLen >= minGapSamples && silenceStart > sr && off < x.length - sr) {
+            edges.push({ start: silenceStart, end: off });
+          }
+          inSilence = false;
+        }
+      }
+    }
+    return edges;
+  }
+
+  return { mixToMono, detectContentBounds, detectGaps, prepareForMatch, resample, findInReference };
 })();
 
 if (typeof module !== "undefined" && module.exports) module.exports = DSP;

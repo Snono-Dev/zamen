@@ -151,6 +151,89 @@ const Exporters = (() => {
     return lines.join("\r\n");
   }
 
+  /* ---------- OpenTimelineIO (OTIO) — Pixar open standard ----------
+     JSON-based interchange format compatible with Kdenlive 25.04+,
+     Avid, Premiere (via opentimelineio), Resolve. */
+
+  function rt(rate, seconds) {
+    return {
+      "OTIO_SCHEMA": "RationalTime.1",
+      "rate": rate,
+      "value": Math.round(Math.max(0, seconds) * rate)
+    };
+  }
+
+  function otio(rows, opts) {
+    const rate = opts.fps || 24;
+    const seqDur = Math.max(...rows.map(r => r.end), 1);
+
+    function makeClip(r) {
+      const clipDur = Math.max(0.001, r.end - r.start);
+      const filePath = r.name.replace(/^[★☆]\s*/, "").trim();
+      const durVal = Math.round(clipDur * rate);
+
+      return {
+        "OTIO_SCHEMA": "Clip.2",
+        "effects": [], "markers": [], "enabled": true,
+        "metadata": {},
+        "name": filePath,
+        "source_range": {
+          "OTIO_SCHEMA": "TimeRange.1",
+          "start_time": { "OTIO_SCHEMA": "RationalTime.1", "rate": rate, "value": 0 },
+          "duration": { "OTIO_SCHEMA": "RationalTime.1", "rate": rate, "value": durVal }
+        },
+        "media_references": {
+          "DEFAULT_MEDIA": {
+            "OTIO_SCHEMA": "ExternalReference.1",
+            "metadata": {}, "name": "",
+            "target_url": encodeURI(filePath),
+            "available_range": {
+              "OTIO_SCHEMA": "TimeRange.1",
+              "start_time": { "OTIO_SCHEMA": "RationalTime.1", "rate": rate, "value": 0 },
+              "duration": { "OTIO_SCHEMA": "RationalTime.1", "rate": rate, "value": durVal }
+            },
+            "available_image_bounds": null
+          }
+        },
+        "active_media_reference_key": "DEFAULT_MEDIA"
+      };
+    }
+
+    const tracks = rows.map((r, i) => ({
+      "OTIO_SCHEMA": "Track.1",
+      "metadata": {},
+      "name": "A" + (i + 1),
+      "source_range": {
+        "OTIO_SCHEMA": "TimeRange.1",
+        "start_time": { "OTIO_SCHEMA": "RationalTime.1", "rate": rate, "value": Math.round(r.start * rate) },
+        "duration": { "OTIO_SCHEMA": "RationalTime.1", "rate": rate, "value": Math.round((r.end - r.start) * rate) }
+      },
+      "effects": [], "markers": [], "enabled": true,
+      "children": [makeClip(r)],
+      "kind": "Audio"
+    }));
+
+    return JSON.stringify({
+      "OTIO_SCHEMA": "Timeline.1",
+      "metadata": {},
+      "name": "",
+      "global_start_time": null,
+      "source_range": {
+        "OTIO_SCHEMA": "TimeRange.1",
+        "start_time": { "OTIO_SCHEMA": "RationalTime.1", "rate": rate, "value": 0 },
+        "duration": { "OTIO_SCHEMA": "RationalTime.1", "rate": rate, "value": Math.round(seqDur * rate) }
+      },
+      "tracks": {
+        "OTIO_SCHEMA": "Stack.1",
+        "metadata": {},
+        "name": "tracks",
+        "source_range": null,
+        "effects": [], "markers": [], "enabled": true,
+        "children": tracks
+      }
+    }, null, 2);
+  }
+
   /* ---------- FCPXML (DaVinci Resolve / Final Cut) ----------
      Unlimited lanes: every clip gets its own track above the primary
      storyline — ideal for one-master-audio + many camera angles. */
@@ -250,6 +333,7 @@ const Exporters = (() => {
     labels:  { ext: ".txt",  mime: "text/plain",      gen: (rows) => labels(rows) },
     edl:     { ext: ".edl",  mime: "text/plain",      gen: edl },
     fcpxml:  { ext: ".fcpxml", mime: "application/xml", gen: fcpxml },
+    otio:    { ext: ".otio", mime: "application/json", gen: otio },
     txt:     { ext: ".txt",  mime: "text/plain",      gen: txt }
   };
 
@@ -267,7 +351,7 @@ const Exporters = (() => {
     exportAs,
     fmtFramesPub: fmtFrames,
     fmtMsPub: fmtMs,
-    __internals: { csv, json, srt, labels, edl, txt, fcpxml, fmtFrames, fmtMs }
+    __internals: { csv, json, srt, labels, edl, txt, fcpxml, otio, fmtFrames, fmtMs }
   };
 })();
 

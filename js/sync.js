@@ -49,6 +49,7 @@ const SyncEngine = (() => {
     errs.sort((a, b) => a - b);
     const medErrMs = errs[Math.floor(errs.length / 2)] / srN * 1000;
     const tolMs = Math.max(25, (M / srN) * 1000 * 0.0012);
+    console.log("[verify] errs(ms):", errs.map(e => (e / srN * 1000).toFixed(1)), "med=" + medErrMs.toFixed(1) + " tol=" + tolMs.toFixed(1) + " scored=" + scored);
     return medErrMs <= tolMs && scored >= 2;
   }
 
@@ -62,7 +63,7 @@ const SyncEngine = (() => {
 
     // Short chunks keep drift negligible inside each chunk;
     // the cross-chunk linear fit recovers the drift itself.
-    const chunkLen = Math.max(Math.round(sr * 2.5), Math.floor(M / 16));
+    let chunkLen = Math.max(Math.round(sr * 2.5), Math.floor(M / 16));
     let K = Math.min(12, Math.floor(M / chunkLen));
     if (K < 3) { K = 3; chunkLen = Math.floor(M / K); }
 
@@ -78,10 +79,11 @@ const SyncEngine = (() => {
       results.push({ pos, index: m.index, score: m.score });
     }
 
+    console.log("[locate] chunks:", results.map(r => ({ pos: r.pos, idx: r.index, score: r.score.toFixed(4) })));
     const ok = results.filter(r => r.score >= confMin);
     if (!ok.length) {
-      // nothing survived: retry with quarter-trims for extreme overhangs
-      const best = await edgeTrims(ref, frag, confMin, onProgress);
+      console.log("[locate] no chunk above confMin=" + confMin + ", best=" + Math.max(...results.map(r => r.score)).toFixed(4));
+      const best = await edgeTrims(ref, frag, sr, confMin, onProgress);
       return best;
     }
 
@@ -142,9 +144,10 @@ const SyncEngine = (() => {
 
   /* Fallback for short clips / heavy overhang: try full, then drop the
      trailing quarter, then drop the leading quarter. */
-  async function edgeTrims(ref, frag, confMin, onProgress) {
+  async function edgeTrims(ref, frag, sr, confMin, onProgress) {
     const M = frag.length;
     const q = Math.round(M * 0.25);
+    console.log("[edgeTrims] trying edge trims, M=" + M + " q=" + q);
 
     const head = frag.subarray(0, M - q);
     const mA = await D.findInReference(ref, head, p => onProgress && onProgress(p * 0.33));
@@ -153,6 +156,7 @@ const SyncEngine = (() => {
     const tailPart = frag.subarray(q);
     const mB = await D.findInReference(ref, tailPart, p => onProgress && onProgress(0.33 + p * 0.33));
     await tick();
+    console.log("[edgeTrims] head score=" + mA.score.toFixed(4) + " tail score=" + mB.score.toFixed(4));
 
     const cands = [
       { startSamples: mA.index, score: mA.score, rate: 1, partial: "tail", valid: mA.index >= 0 },
@@ -165,46 +169,13 @@ const SyncEngine = (() => {
     return finalize(c.startSamples, c.score, c.rate, c.partial);
   }
 
-  /* Precise two-probe drift estimation between an already-located fragment
-     and its source. Returns { rate, startSec } or null. */
-  async function measureDrift(refAll, frag, globalIndex, sr, confMin) {
-    const M = frag.length;
-    if (M < sr * 25) return null;
-
-    const probeLen = Math.min(sr * 20, Math.round(M * 0.2));
-    const p1 = Math.max(Math.round(M * 0.08), sr);
-    const p2 = M - probeLen - p1;
-    if (p2 - p1 < sr * 10) return null;
-
-    const slack = Math.max(2 * sr, Math.round(M * 0.02));
-
-    async function probe(p) {
-      const expected = globalIndex + p;
-      const s = Math.max(0, expected - slack);
-      const e = Math.min(refAll.length, expected + probeLen + slack);
-      const m = await D.findInReference(refAll.subarray(s, e), frag.subarray(p, p + probeLen));
-      await tick();
-      return { score: m.score, refPos: s + m.index };
-    }
-
-    const r1 = await probe(p1);
-    const r2 = await probe(p2);
-    if (r1.score < confMin || r2.score < confMin) return null;
-
-    const dt = p2 - p1;
-    const dr = r2.refPos - r1.refPos;
-    const rate = dr / dt;
-    if (!isFinite(rate) || Math.abs(rate - 1) > 0.05) return null;
-
-    const startSamples = r1.refPos - p1 * rate;
-    return { rate, startSec: Math.max(0, startSamples / sr) };
-  }
-
   /* clips: [{id, name, mono, sr, duration}]
      opts: { confMin, gap, drift, onProgress(frac, name) }
      returns placements sorted by start:
      [{ clip, start, end, score, driftMs, partial, note }] */
   async function align(clips, opts) {
+    console.log("[align] starting with", clips.length, "clips, confMin=", opts.confMin);
+    for (const c of clips) console.log("[align] clip:", c.name, "dur=" + c.duration.toFixed(2) + "s");
     const order = [...clips].sort((a, b) => b.duration - a.duration);
     const anchor = order[0];
     const placements = new Map();
@@ -220,6 +191,7 @@ const SyncEngine = (() => {
     // Returns best verified { startSec, rate, score, partial } in GLOBAL seconds.
     async function tryPlace(c, fracBase, fracSpan) {
       let best = null;
+      console.log("[tryPlace] searching for:", c.name);
       const consider = cand => {
         if (cand && (!best || cand.score > best.score)) best = cand;
       };
@@ -235,8 +207,10 @@ const SyncEngine = (() => {
 
         if (c.mono.length < src.mono.length) {
           // normal: place the shorter incoming clip inside the source
+          console.log("[tryPlace] locate:", c.name, "inside", src.name, "(normal)");
           const loc = await locate(src.mono, c.mono, c.sr, opts.confMin);
           if (loc) {
+            console.log("[tryPlace] found:", c.name, "score=" + loc.score.toFixed(4), "start=" + (loc.startSamples / c.sr).toFixed(3) + "s");
             consider({
               startSec: gOff + loc.startSamples / c.sr,
               rate: loc.rate, score: loc.score, partial: loc.partial,
@@ -248,8 +222,10 @@ const SyncEngine = (() => {
           // incoming clip is LONGER than this source: reverse-search the
           // source inside it. The fitted intercept (source start in the
           // incoming clip's local time) yields the incoming global start.
+          console.log("[tryPlace] locate:", src.name, "inside", c.name, "(reverse)");
           const rev = await locate(c.mono, src.mono, src.sr, opts.confMin);
           if (rev) {
+            console.log("[tryPlace] found reverse:", src.name, "score=" + rev.score.toFixed(4), "start=" + (rev.startSamples / src.sr).toFixed(3) + "s");
             consider({
               startSec: gOff - rev.startSamples / src.sr,
               rate: rev.rate, score: rev.score * 0.98,
@@ -264,10 +240,15 @@ const SyncEngine = (() => {
 
       /* ---- final gate: independently prove the winning placement ---- */
       if (best) {
+        console.log("[tryPlace] best candidate:", c.name, "score=" + best.score.toFixed(4), "start=" + best.startSec.toFixed(3) + "s");
         const proven = await verifyPlacement(
           best.haystack, best.needle, best.localStart, best.rate, best.srN, opts.confMin
         );
-        if (!proven) return null; // better no timecode than a wrong one
+        if (!proven) {
+          console.log("[tryPlace] verifyPlacement REJECTED:", c.name);
+          return null; // better no timecode than a wrong one
+        }
+        console.log("[tryPlace] verifyPlacement PASSED:", c.name);
       }
       return best;
     }
@@ -276,7 +257,7 @@ const SyncEngine = (() => {
       const useRate = !!opts.drift;
       const rate = useRate ? best.rate : 1;
       let start = best.startSec;
-      if (best.partial === "head") start = Math.max(0, start);
+      console.log("[commit] PLACED:", c.name, "start=" + start.toFixed(3) + "s", "score=" + best.score.toFixed(4));
       placements.set(c.id, {
         clip: c, start,
         end: start + c.duration * rate,
@@ -295,6 +276,7 @@ const SyncEngine = (() => {
       if (best && best.score >= opts.confMin) {
         commitPlacement(c, best);
       } else {
+        console.log("[pass1] UNMATCHED:", c.name, "bestScore=" + (best ? best.score.toFixed(4) : "null"));
         placements.set(c.id, {
           clip: c, start: cursor, end: cursor + c.duration,
           score: best ? best.score : null, driftMs: null, partial: null,
@@ -318,11 +300,21 @@ const SyncEngine = (() => {
     }
 
     const out = [...placements.values()].sort((a, b) => a.start - b.start);
+
+    // Shift all placements so the earliest start is 0
+    const minStart = Math.min(...out.map(p => p.start));
+    if (minStart < 0) {
+      for (const p of out) {
+        p.start -= minStart;
+        p.end -= minStart;
+      }
+    }
+
     if (opts.onProgress) opts.onProgress(1, "");
     return out;
   }
 
-  return { align, locate, verifyPlacement, measureDrift };
+  return { align, locate, verifyPlacement };
 })();
 
 if (typeof module !== "undefined" && module.exports) module.exports = SyncEngine;
