@@ -47,3 +47,9 @@
 4. **Smart matching — chunk voting**: every clip is split into short chunks (~2.5 s) short enough that clock drift is negligible inside them. Each chunk is located independently by FFT-based Normalized Cross-Correlation; a least-squares line through the surviving chunk positions yields both the precise placement **and the drift rate**
 5. **Chaining**: files that do not touch the anchor are searched inside previously placed clips, so spanned recordings connect automatically; partial overlaps (clips extending past a source's edges) are supported
 6. **Offset**: the offset is added to all timings, then export files are generated
+
+---
+
+> **Note**: This project was fully designed and built in collaboration with AI.
+
+> **Made in Mesopotamia** 🇮🇶

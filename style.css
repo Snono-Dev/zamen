@@ -5,8 +5,8 @@
   --border: #2d3748;
   --text: #e6edf3;
   --muted: #8b949e;
-  --accent: #4f8cff;
-  --accent2: #7c5cff;
+  --accent: #2b7de9;
+  --accent2: #f0c040;
   --ok: #3fb950;
   --warn: #d29922;
   --err: #f85149;
@@ -27,8 +27,9 @@ main { max-width: 900px; margin: 0 auto; padding: 0 16px 40px; }
 
 .topbar {
   max-width: 900px; margin: 0 auto; padding: 28px 16px 10px;
-  display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
 }
+.topbar .btn-group { display: flex; gap: 6px; align-items: center; }
 .brand { display: flex; align-items: center; gap: 14px; }
 .brand-logo {
   width: 44px; height: 44px; border-radius: 11px;
@@ -165,7 +166,6 @@ tr.warn-row td { background: rgba(210,153,34,.07); }
 }
 .conf-high { background: rgba(63,185,80,.15); color: var(--ok); }
 .conf-mid  { background: rgba(210,153,34,.15); color: var(--warn); }
-.conf-none { background: rgba(248,81,73,.15); color: var(--err); }
 
 .exports { display: flex; gap: 9px; flex-wrap: wrap; }
 
@@ -186,4 +186,5 @@ footer {
 @media (max-width: 560px) {
   .topbar { flex-direction: column; }
   .process-row { flex-direction: column; align-items: stretch; text-align: center; }
+  footer .footer-inner { flex-direction: column; gap: 4px; }
 }
